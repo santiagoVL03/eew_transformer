@@ -391,9 +391,9 @@ filtered = bandpass(
 - Adaptive learning
 - Continual learning scenarios
 
-## Comparison to Paper
+## Comparisons
 
-### Matches Paper:
+### Matches:
 ✓ 3-channel input (X, Y, Z)  
 ✓ Embedding dimension: 64  
 ✓ Multi-head attention: 8 heads  

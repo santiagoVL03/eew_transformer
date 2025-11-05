@@ -85,7 +85,8 @@ class STEADDataset(Dataset):
         
         try:
             # Get sample from seisbench - MEMORY OPTIMIZED
-            waveform, metadata = self.seisbench_dataset.get_sample(dataset_idx)
+            sample = self.seisbench_dataset.get_sample(dataset_idx)
+            waveform, metadata = sample
             
             # Convert to numpy if needed and delete torch tensor immediately
             if isinstance(waveform, torch.Tensor):
@@ -330,6 +331,9 @@ class STEADLoader:
             if self.filtered_indices is None:
                 self.filter_by_region()
             indices = self.filtered_indices
+        
+        if indices is None:
+            raise ValueError("No indices available to load waveforms")
         
         if max_samples:
             indices = indices[:max_samples]

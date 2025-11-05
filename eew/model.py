@@ -19,7 +19,7 @@ class PositionalEncoding(nn.Module):
     """
     Sinusoidal positional encoding as in Vaswani et al. (2017).
     """
-    
+    pe: torch.Tensor
     def __init__(self, d_model, max_len=5000, dropout=0.1):
         super().__init__()
         self.dropout = nn.Dropout(p=dropout)

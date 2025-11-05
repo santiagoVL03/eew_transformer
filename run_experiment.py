@@ -121,6 +121,8 @@ def parse_args():
                        help='Number of dataloader workers')
     parser.add_argument('--seed', type=int, default=42,
                        help='Random seed')
+    parser.add_argument('--deterministic', action='store_true',
+                       help='Enable deterministic mode (reproducible but slower, NOT recommended with augmentation)')
     
     # Output
     parser.add_argument('--save_dir', type=str, default='./results',
@@ -157,10 +159,19 @@ def main():
     logging.info("=" * 70 + "\n")
     
     # Set random seed
-    set_seed(args.seed, deterministic=True)
+    # IMPORTANT: Do NOT use deterministic=True with augmentation!
+    # It causes augmentation to produce the same outputs every epoch.
+    set_seed(args.seed, deterministic=args.deterministic)
+    
+    if args.augment and args.deterministic:
+        logging.warning("=" * 70)
+        logging.warning("WARNING: deterministic=True with augmentation enabled!")
+        logging.warning("This will cause augmentation to produce identical outputs every epoch.")
+        logging.warning("Recommend: Run without --deterministic flag")
+        logging.warning("=" * 70 + "\n")
     
     # Get device
-    device = get_device(args.use_gpu)
+    device = 'cuda' if torch.cuda.is_available() and args.use_gpu else 'cpu'
     
     # Calculate sequence length
     seq_len = int(args.window * args.sampling_rate)
@@ -188,7 +199,7 @@ def main():
     # ========================================================================
     
     # Limit total samples to prevent RAM issues
-    total_samples = len(loader.filtered_indices)
+    total_samples = len(loader.filtered_indices) # type: ignore
     
     if args.train_subset and args.train_subset < total_samples:
         logging.info(f"\n*** LIMITING DATASET SIZE FOR RAM OPTIMIZATION ***")
@@ -199,10 +210,10 @@ def main():
         # Randomly sample indices
         np.random.seed(args.seed)
         subset_indices = np.random.choice(
-            loader.filtered_indices,
+            loader.filtered_indices, # type: ignore
             size=args.train_subset,
             replace=False
-        ).tolist()
+        ).tolist() # type: ignore
         loader.filtered_indices = subset_indices
     
     # Determine if we should use lazy loading
@@ -215,7 +226,7 @@ def main():
         
         # Don't preload waveforms, just get metadata for statistics
         # We'll use a small sample just to show statistics
-        sample_size = min(1000, len(loader.filtered_indices))
+        sample_size = min(1000, len(loader.filtered_indices)) # type: ignore
         waveforms_sample, labels_sample, _ = loader.load_waveforms(
             phase=args.phase,
             window_size=args.window,
@@ -224,7 +235,7 @@ def main():
         )
         
         logging.info(f"\nDataset statistics (sampled from {sample_size} waveforms):")
-        logging.info(f"  Total filtered samples: {len(loader.filtered_indices)}")
+        logging.info(f"  Total filtered samples: {len(loader.filtered_indices)}") # type: ignore
         logging.info(f"  Earthquakes (sample): {np.sum(labels_sample)} ({np.sum(labels_sample)/len(labels_sample)*100:.1f}%)")
         logging.info(f"  Noise (sample): {len(labels_sample) - np.sum(labels_sample)} ({(1-np.sum(labels_sample)/len(labels_sample))*100:.1f}%)")
         logging.info(f"  Waveform shape: {waveforms_sample.shape}\n")
@@ -263,7 +274,7 @@ def main():
     # Compute class weights for imbalanced data
     if n_earthquakes > 0 and n_noise > 0:
         # Weight for positive class (earthquake)
-        pos_weight = n_noise / n_earthquakes
+        pos_weight =  n_noise / n_earthquakes
         logging.info(f"Class imbalance - pos_weight: {pos_weight:.2f}\n")
     else:
         pos_weight = 1.0
