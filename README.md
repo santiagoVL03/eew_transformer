@@ -145,8 +145,6 @@ eew_transformer/
 
 ### Transformer Model
 
-Following the paper (Wu et al., 2025):
-
 1. **Input**: 3-channel waveform (X, Y, Z) × n timesteps (n=200 for 2s @ 100Hz)
 2. **Embedding**: Linear projection (3 → 64) per timestep
 3. **Positional Encoding**: Sinusoidal (Vaswani et al.)

@@ -39,7 +39,10 @@ class Trainer:
         class_weights=None,
         early_stopping_patience=10,
         checkpoint_dir='./checkpoints',
-        log_interval=10
+        log_interval=10,
+        criterion=None,
+        mixup_alpha=0.0,
+        gradient_accumulation_steps=1
     ):
         """
         Args:
@@ -54,6 +57,9 @@ class Trainer:
             early_stopping_patience: Patience for early stopping
             checkpoint_dir: Directory to save checkpoints
             log_interval: Log interval in batches
+            criterion: Custom loss function (optional)
+            mixup_alpha: Mixup alpha parameter (0 = disabled)
+            gradient_accumulation_steps: Number of steps to accumulate gradients
         """
         self.model = model.to(device)
         self.train_loader = train_loader
@@ -67,8 +73,21 @@ class Trainer:
         self.use_amp = use_amp and (device_type == 'cuda')
         self.log_interval = log_interval
         
+        # Gradient accumulation
+        self.gradient_accumulation_steps = gradient_accumulation_steps
+        
+        # Mixup augmentation
+        self.mixup_alpha = mixup_alpha
+        if mixup_alpha > 0:
+            from .advanced_augmentation import MixupAugmenter
+            self.mixup = MixupAugmenter(alpha=mixup_alpha, p=0.5)
+        else:
+            self.mixup = None
+        
         # Setup loss function
-        if class_weights is not None:
+        if criterion is not None:
+            self.criterion = criterion
+        elif class_weights is not None:
             if isinstance(class_weights, (list, tuple, np.ndarray)):
                 # Assume binary classification with [weight_class0, weight_class1]
                 pos_weight = torch.tensor([class_weights[1] / class_weights[0]]).to(device)
@@ -138,7 +157,7 @@ class Trainer:
     
     def train_epoch(self, epoch):
         """
-        Train for one epoch.
+        Train for one epoch with gradient accumulation and mixup support.
         
         Returns:
             Average training loss
@@ -153,14 +172,18 @@ class Trainer:
         pbar = tqdm(self.train_loader, desc=f'Epoch {epoch}', disable=False)
         
         batch_count = 0
+        accumulated_loss = 0.0
+        
         for batch_idx, (waveforms, labels) in enumerate(pbar):
             batch_count += 1
+            
             # Move to device (non_blocking for faster transfer)
             waveforms = waveforms.to(self.device, non_blocking=True)
             labels = labels.to(self.device, non_blocking=True)
             
-            # Zero gradients BEFORE forward pass to free memory early
-            self.optimizer.zero_grad(set_to_none=True)
+            # Apply mixup augmentation if enabled
+            if self.mixup is not None:
+                waveforms, labels = self.mixup(waveforms, labels)
             
             # Forward pass with AMP
             if self.use_amp:
@@ -169,6 +192,8 @@ class Trainer:
                     # Clamp logits to prevent extreme values
                     logits = torch.clamp(logits, min=-20, max=20)
                     loss = self.criterion(logits, labels)
+                    # Scale loss by accumulation steps
+                    loss = loss / self.gradient_accumulation_steps
                 
                 # Check for invalid loss before backward
                 if torch.isnan(loss) or torch.isinf(loss):
@@ -179,17 +204,25 @@ class Trainer:
                 # Backward pass
                 self.scaler.scale(loss).backward()
                 
-                # Gradient clipping to prevent explosion
-                self.scaler.unscale_(self.optimizer)
-                torch.nn.utils.clip_grad_norm_(self.model.parameters(), max_norm=1.0)
+                accumulated_loss += loss.item() * self.gradient_accumulation_steps
                 
-                self.scaler.step(self.optimizer)
-                self.scaler.update()
+                # Update weights every N steps
+                if (batch_idx + 1) % self.gradient_accumulation_steps == 0:
+                    # Gradient clipping to prevent explosion
+                    self.scaler.unscale_(self.optimizer)
+                    torch.nn.utils.clip_grad_norm_(self.model.parameters(), max_norm=1.0)
+                    
+                    self.scaler.step(self.optimizer)
+                    self.scaler.update()
+                    self.optimizer.zero_grad(set_to_none=True)
+                    
             else:
                 logits = self.model(waveforms)
                 # Clamp logits to prevent extreme values
                 logits = torch.clamp(logits, min=-20, max=20)
                 loss = self.criterion(logits, labels)
+                # Scale loss by accumulation steps
+                loss = loss / self.gradient_accumulation_steps
                 
                 # Check for invalid loss before backward
                 if torch.isnan(loss) or torch.isinf(loss):
@@ -200,13 +233,18 @@ class Trainer:
                 # Backward pass
                 loss.backward()
                 
-                # Gradient clipping to prevent explosion
-                torch.nn.utils.clip_grad_norm_(self.model.parameters(), max_norm=1.0)
+                accumulated_loss += loss.item() * self.gradient_accumulation_steps
                 
-                self.optimizer.step()
+                # Update weights every N steps
+                if (batch_idx + 1) % self.gradient_accumulation_steps == 0:
+                    # Gradient clipping to prevent explosion
+                    torch.nn.utils.clip_grad_norm_(self.model.parameters(), max_norm=1.0)
+                    
+                    self.optimizer.step()
+                    self.optimizer.zero_grad(set_to_none=True)
             
             # Update metrics (convert to Python scalar immediately)
-            loss_value = loss.item()
+            loss_value = loss.item() * self.gradient_accumulation_steps
             batch_size = waveforms.size(0)
             
             # Additional safety check after .item()
@@ -227,6 +265,18 @@ class Trainer:
             # Update progress bar
             if batch_idx % self.log_interval == 0:
                 pbar.set_postfix({'loss': f'{loss_meter.avg:.4f}'})
+        
+        # Handle remaining gradients if batch count not divisible by accumulation steps
+        if (batch_count % self.gradient_accumulation_steps) != 0:
+            if self.use_amp:
+                self.scaler.unscale_(self.optimizer)
+                torch.nn.utils.clip_grad_norm_(self.model.parameters(), max_norm=1.0)
+                self.scaler.step(self.optimizer)
+                self.scaler.update()
+            else:
+                torch.nn.utils.clip_grad_norm_(self.model.parameters(), max_norm=1.0)
+                self.optimizer.step()
+            self.optimizer.zero_grad(set_to_none=True)
         
         # DEBUG: Log completion of training epoch
         

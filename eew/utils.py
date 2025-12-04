@@ -9,6 +9,17 @@ import torch
 from pathlib import Path
 
 
+# Compatibility class for loading old checkpoints
+# This allows loading models saved with different class names
+class TFEQ:
+    """
+    Compatibility wrapper for loading checkpoints from external sources.
+    This class exists to support loading models that were saved with
+    the TFEQ class name instead of Transformer.
+    """
+    pass
+
+
 def set_seed(seed=42, deterministic=True):
     """
     Set random seeds for reproducibility.

@@ -105,6 +105,27 @@ def parse_args():
                        help='Minimum SNR for noise augmentation (dB)')
     parser.add_argument('--noise_snr_max', type=float, default=20.0,
                        help='Maximum SNR for noise augmentation (dB)')
+    parser.add_argument('--mixup_alpha', type=float, default=0.2,
+                       help='Mixup alpha parameter (0 = disabled, typical: 0.1-0.4)')
+    parser.add_argument('--use_advanced_aug', action='store_true',
+                       help='Use advanced augmentation (channel dropout, baseline drift)')
+    
+    # Loss function
+    parser.add_argument('--loss_type', type=str, default='focal',
+                       choices=['bce', 'focal', 'label_smoothing', 'combined'],
+                       help='Loss function type')
+    parser.add_argument('--focal_alpha', type=float, default=0.25,
+                       help='Focal loss alpha parameter')
+    parser.add_argument('--focal_gamma', type=float, default=2.0,
+                       help='Focal loss gamma parameter')
+    parser.add_argument('--label_smoothing', type=float, default=0.1,
+                       help='Label smoothing factor (0 = disabled)')
+    
+    # Training optimizations
+    parser.add_argument('--gradient_accumulation', type=int, default=4,
+                       help='Gradient accumulation steps (effective batch = batch * this)')
+    parser.add_argument('--warmup_epochs', type=int, default=5,
+                       help='Number of warmup epochs for learning rate')
     
     # Evaluation
     parser.add_argument('--mc_dropout', action='store_true',
@@ -286,15 +307,30 @@ def main():
     
     # Setup augmentation
     if args.augment:
-        transform_train = WaveformAugmenter(
-            add_noise=True,
-            noise_snr_range=(args.noise_snr_min, args.noise_snr_max),
-            scale_amplitude=True,
-            time_shift=True,
-            sampling_rate=args.sampling_rate,
-            p=0.5
-        )
-        logging.info("Data augmentation enabled for training set")
+        if args.use_advanced_aug:
+            from eew.advanced_augmentation import AdvancedWaveformAugmenter
+            transform_train = AdvancedWaveformAugmenter(
+                add_noise=True,
+                noise_snr_range=(args.noise_snr_min, args.noise_snr_max),
+                scale_amplitude=True,
+                time_shift=True,
+                channel_dropout=True,
+                channel_drop_prob=0.1,
+                baseline_drift=True,
+                sampling_rate=args.sampling_rate,
+                p=0.5
+            )
+            logging.info("Advanced data augmentation enabled (noise, scaling, time shift, channel dropout, baseline drift)")
+        else:
+            transform_train = WaveformAugmenter(
+                add_noise=True,
+                noise_snr_range=(args.noise_snr_min, args.noise_snr_max),
+                scale_amplitude=True,
+                time_shift=True,
+                sampling_rate=args.sampling_rate,
+                p=0.5
+            )
+            logging.info("Data augmentation enabled for training set")
     else:
         transform_train = None
         logging.info("No data augmentation")
@@ -357,6 +393,35 @@ def main():
         weight_decay=args.weight_decay
     )
     
+    # Setup loss function
+    from eew.losses import get_loss_function
+    
+    if args.loss_type == 'focal':
+        criterion = get_loss_function(
+            'focal',
+            alpha=args.focal_alpha,
+            gamma=args.focal_gamma
+        )
+        logging.info(f"Using Focal Loss (alpha={args.focal_alpha}, gamma={args.focal_gamma})")
+    elif args.loss_type == 'label_smoothing':
+        criterion = get_loss_function(
+            'label_smoothing',
+            smoothing=args.label_smoothing,
+            pos_weight=pos_weight
+        )
+        logging.info(f"Using Label Smoothing BCE (smoothing={args.label_smoothing})")
+    elif args.loss_type == 'combined':
+        criterion = get_loss_function(
+            'combined',
+            alpha=args.focal_alpha,
+            gamma=args.focal_gamma,
+            smoothing=args.label_smoothing
+        )
+        logging.info(f"Using Combined Loss (Focal + Label Smoothing)")
+    else:
+        criterion = None  # Will use default BCE in Trainer
+        logging.info(f"Using BCE Loss with pos_weight={pos_weight:.2f}")
+    
     if args.scheduler == 'plateau':
         scheduler = optim.lr_scheduler.ReduceLROnPlateau(
             optimizer,
@@ -366,15 +431,38 @@ def main():
         )
         logging.info("Using ReduceLROnPlateau scheduler")
     elif args.scheduler == 'cosine':
-        scheduler = optim.lr_scheduler.CosineAnnealingLR(
-            optimizer,
-            T_max=args.epochs,
-            eta_min=1e-6
-        )
-        logging.info("Using CosineAnnealingLR scheduler")
+        # Cosine annealing with warmup
+        total_steps = args.epochs
+        warmup_steps = args.warmup_epochs
+        
+        # Create warmup + cosine scheduler
+        if warmup_steps > 0:
+            from torch.optim.lr_scheduler import LambdaLR
+            
+            def lr_lambda(epoch):
+                if epoch < warmup_steps:
+                    return (epoch + 1) / warmup_steps
+                else:
+                    progress = (epoch - warmup_steps) / (total_steps - warmup_steps)
+                    return 0.5 * (1 + np.cos(np.pi * progress))
+            
+            scheduler = LambdaLR(optimizer, lr_lambda)
+            logging.info(f"Using Cosine Annealing with {warmup_steps} warmup epochs")
+        else:
+            scheduler = optim.lr_scheduler.CosineAnnealingLR(
+                optimizer,
+                T_max=args.epochs,
+                eta_min=1e-6
+            )
+            logging.info("Using CosineAnnealingLR scheduler")
     else:
         scheduler = None
         logging.info("No learning rate scheduler")
+    
+    # Log effective batch size with gradient accumulation
+    effective_batch_size = args.batch * args.gradient_accumulation
+    logging.info(f"Batch size: {args.batch}, Gradient accumulation: {args.gradient_accumulation}")
+    logging.info(f"Effective batch size: {effective_batch_size}\n")
     
     # ========================================================================
     # Training
@@ -391,9 +479,12 @@ def main():
             scheduler=scheduler,
             device=device,
             use_amp=True,
-            class_weights=pos_weight,
+            class_weights=pos_weight if criterion is None else None,
             early_stopping_patience=args.early_stopping,
-            checkpoint_dir=save_dir / 'checkpoints'
+            checkpoint_dir=str(save_dir / 'checkpoints'),
+            criterion=criterion,
+            mixup_alpha=args.mixup_alpha,
+            gradient_accumulation_steps=args.gradient_accumulation
         )
         
         # Train

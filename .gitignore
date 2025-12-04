@@ -76,3 +76,4 @@ temp/
 
 # Seisbench cache
 .seisbench/
+*.json
