@@ -1,0 +1,20 @@
+
+    EEW_TRANSFORMER EVALUATION SUMMARY
+    ============================================================
+    
+    EARTHQUAKES (10 events):
+      - Correct detections: 10/10
+      - Mean probability: 0.936
+      - Magnitude range: 4.2 - 6.2
+      - Depth range: 8-60 km
+      - Distance range: 40-220 km
+    
+    NOISE (4 samples):
+      - Correct rejections: 4/4
+      - Mean probability: 0.027
+    
+    OVERALL:
+      - Accuracy: 100.0%
+      - Total samples: 14
+    ============================================================
+    
