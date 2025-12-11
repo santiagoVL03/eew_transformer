@@ -10,7 +10,7 @@ from .preprocessing import preprocess_waveform, extract_phase_window
 from .augmentation import WaveformAugmenter
 from .trainer import Trainer
 from .evaluator import Evaluator
-from .utils import set_seed, get_device, count_parameters
+from .utils import set_seed, get_device, count_parameters, print_augmentation_stats, reset_augmentation_stats
 
 __version__ = "1.0.0"
 __author__ = "Transformer Implementation"
@@ -26,4 +26,6 @@ __all__ = [
     'set_seed',
     'get_device',
     'count_parameters',
+    'print_augmentation_stats',
+    'reset_augmentation_stats',
 ]

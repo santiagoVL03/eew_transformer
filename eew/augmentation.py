@@ -16,6 +16,14 @@ class WaveformAugmenter:
     Data augmentation for seismic waveforms.
     """
     
+    # Contador de estadísticas (compartido entre todas las instancias)
+    _stats = {
+        'total_processed': 0,
+        'earthquakes_processed': 0,
+        'noise_processed': 0,
+        'augmentations_applied': 0
+    }
+    
     def __init__(
         self,
         add_noise=True,
@@ -25,7 +33,8 @@ class WaveformAugmenter:
         time_shift=True,
         shift_range=(-0.1, 0.1),
         sampling_rate=100,
-        p=0.5
+        p=0.5,
+        track_stats=True
     ):
         """
         Args:
@@ -37,6 +46,7 @@ class WaveformAugmenter:
             shift_range: Time shift range in seconds (min, max)
             sampling_rate: Sampling rate in Hz
             p: Probability of applying each augmentation
+            track_stats: Whether to track augmentation statistics
         """
         self.add_noise = add_noise
         self.noise_snr_range = noise_snr_range
@@ -46,6 +56,7 @@ class WaveformAugmenter:
         self.shift_range = shift_range
         self.sampling_rate = sampling_rate
         self.p = p
+        self.track_stats = track_stats
     
     def __call__(self, waveform):
         """
@@ -57,21 +68,59 @@ class WaveformAugmenter:
         Returns:
             Augmented waveform
         """
+        if self.track_stats:
+            WaveformAugmenter._stats['total_processed'] += 1
+        
         augmented = waveform.copy()
+        aug_count = 0
         
         # Add noise
         if self.add_noise and np.random.rand() < self.p:
             augmented = self._add_noise(augmented)
+            aug_count += 1
         
         # Scale amplitude
         if self.scale_amplitude and np.random.rand() < self.p:
             augmented = self._scale_amplitude(augmented)
+            aug_count += 1
         
         # Time shift
         if self.time_shift and np.random.rand() < self.p:
             augmented = self._time_shift(augmented)
+            aug_count += 1
+        
+        if self.track_stats and aug_count > 0:
+            WaveformAugmenter._stats['augmentations_applied'] += aug_count
         
         return augmented
+    
+    @classmethod
+    def print_stats(cls):
+        """Imprime las estadísticas de augmentación."""
+        stats = cls._stats
+        total = stats['total_processed']
+        
+        if total == 0:
+            print("\n⚠️  No se han procesado señales con WaveformAugmenter aún")
+            return
+        
+        print("\n" + "="*60)
+        print("ESTADÍSTICAS DE AUGMENTACIÓN - WaveformAugmenter")
+        print("="*60)
+        print(f"Total de señales procesadas: {total:,}")
+        print(f"Augmentaciones aplicadas:    {stats['augmentations_applied']:,}")
+        print(f"Promedio aug/señal:          {stats['augmentations_applied']/total:.2f}")
+        print("="*60 + "\n")
+    
+    @classmethod
+    def reset_stats(cls):
+        """Reinicia las estadísticas."""
+        cls._stats = {
+            'total_processed': 0,
+            'earthquakes_processed': 0,
+            'noise_processed': 0,
+            'augmentations_applied': 0
+        }
     
     def _add_noise(self, waveform):
         """

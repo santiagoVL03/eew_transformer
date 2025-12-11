@@ -34,9 +34,18 @@ class STEADDataset(Dataset):
     2. Lazy: Load data on-the-fly (memory-efficient but slower)
     """
     
+    # Contador de estadísticas (compartido entre todas las instancias)
+    _stats = {
+        'total_loaded': 0,
+        'earthquakes_loaded': 0,
+        'noise_loaded': 0,
+        'earthquakes_augmented': 0,
+        'noise_augmented': 0
+    }
+    
     def __init__(self, waveforms=None, labels=None, phase_picks=None, metadata=None, 
                  transform=None, seisbench_dataset=None, indices=None, 
-                 window_size=2.0, sampling_rate=100, lazy_load=False):
+                 window_size=2.0, sampling_rate=100, lazy_load=False, track_stats=True):
         """
         Args:
             waveforms: Array of waveforms (N, 3, seq_len) - for preloaded mode
@@ -49,8 +58,10 @@ class STEADDataset(Dataset):
             window_size: Window size in seconds (for lazy mode)
             sampling_rate: Sampling rate in Hz (for lazy mode)
             lazy_load: If True, load data on-the-fly instead of preloading
+            track_stats: If True, track statistics of loaded signals
         """
         self.lazy_load = lazy_load
+        self.track_stats = track_stats
         
         if lazy_load:
             # Lazy loading mode - memory efficient
@@ -108,25 +119,55 @@ class STEADDataset(Dataset):
                 num_samples = int(waveform.shape[1] * self.sampling_rate / current_sr)
                 waveform = signal.resample(waveform, num_samples, axis=1)
             
-            # Extract window - directly slice to save memory (no intermediate copies)
+            # Extract window - ALIGN WITH P-WAVE for better signal detection
+            # This is CRITICAL for seismic data: P-wave is the first arrival
+            # and contains most discriminative information
+            
+            # Get P-wave arrival sample if available
+            p_arrival_sample = metadata.get('trace_p_arrival_sample', None)
+            
             if waveform.shape[1] >= self.seq_len:
-                center = waveform.shape[1] // 2
-                start = max(0, center - self.seq_len // 2)
-                end = start + self.seq_len
-                waveform = waveform[:, start:end].copy()  # copy to release original
+                if p_arrival_sample is not None and p_arrival_sample > 0:
+                    # Convert to int to avoid slicing errors
+                    p_arrival_sample = int(p_arrival_sample)
+                    
+                    # ALIGN: Center window around P-wave arrival
+                    # Start 0.5s (50 samples) before P-wave to capture P-wave onset
+                    buffer_before = min(50, p_arrival_sample)  # 0.5s before P
+                    start = int(p_arrival_sample - buffer_before)
+                    end = int(start + self.seq_len)
+                    
+                    # If goes beyond end of waveform, shift back
+                    if end > waveform.shape[1]:
+                        end = waveform.shape[1]
+                        start = max(0, end - self.seq_len)
+                    
+                    waveform = waveform[:, start:end].copy()
+                else:
+                    # FALLBACK: Use center if no P-wave info
+                    center = waveform.shape[1] // 2
+                    start = max(0, center - self.seq_len // 2)
+                    end = start + self.seq_len
+                    waveform = waveform[:, start:end].copy()
             else:
                 # Pad if too short
                 pad_width = self.seq_len - waveform.shape[1]
                 waveform = np.pad(waveform, ((0, 0), (0, pad_width)), mode='constant')
             
-            # CRITICAL: Normalize waveform to prevent NaN issues
-            # Apply per-channel normalization to handle varying amplitudes
+            # CRITICAL: Normalize waveform BEFORE clipping
+            # Use Z-score normalization: (x - mean) / std
+            # This is crucial for seismic data where amplitude varies greatly
             for ch in range(waveform.shape[0]):
+                mean = waveform[ch].mean()
                 std = waveform[ch].std()
-                if std > 1e-10:  # Avoid division by zero
-                    waveform[ch] = waveform[ch] / std
-                # Clip extreme values to prevent numerical instability
-                waveform[ch] = np.clip(waveform[ch], -10, 10)
+                if std > 1e-8:  # Avoid division by zero
+                    waveform[ch] = (waveform[ch] - mean) / std
+                else:
+                    waveform[ch] = 0  # All zeros -> keep as zeros
+                
+                # Clip to 3 sigma (not 10!) to preserve amplitude information
+                # Values outside 3 sigma are rare and likely noise
+                waveform[ch] = np.clip(waveform[ch], -3.0, 3.0)
             
             # Get label
             trace_category = metadata.get('trace_category', 'earthquake_local')
@@ -149,15 +190,75 @@ class STEADDataset(Dataset):
             waveform = self.waveforms[idx]
             label = self.labels[idx]
         
+        # Rastrear estadísticas
+        if self.track_stats:
+            STEADDataset._stats['total_loaded'] += 1
+            if label == 1:
+                STEADDataset._stats['earthquakes_loaded'] += 1
+            else:
+                STEADDataset._stats['noise_loaded'] += 1
+        
         # Apply transform if provided (data augmentation)
         if self.transform:
-            waveform = self.transform(waveform)
+            # Intentar pasar label al transform (para augmentación balanceada)
+            try:
+                # Si el transform acepta label, pasarlo
+                waveform = self.transform(waveform, label)
+                # Si retorna tupla (waveform, label), desempacar
+                if isinstance(waveform, tuple):
+                    waveform, label = waveform
+            except TypeError:
+                # Si no acepta label, usar el método tradicional
+                waveform = self.transform(waveform)
+            
+            # Rastrear augmentaciones
+            if self.track_stats:
+                if label == 1:
+                    STEADDataset._stats['earthquakes_augmented'] += 1
+                else:
+                    STEADDataset._stats['noise_augmented'] += 1
         
         # Convert to torch tensors
         waveform = torch.FloatTensor(waveform)
         label = torch.FloatTensor([label])
         
         return waveform, label
+    
+    @classmethod
+    def print_stats(cls):
+        """Imprime las estadísticas de carga de datos."""
+        stats = cls._stats
+        total = stats['total_loaded']
+        
+        if total == 0:
+            print("\n⚠️  No se han cargado señales aún")
+            return
+        
+        print("\n" + "="*60)
+        print("ESTADÍSTICAS DE CARGA DE DATOS - STEADDataset")
+        print("="*60)
+        print(f"Total de señales cargadas:    {total:,}")
+        print(f"  Terremotos cargados:        {stats['earthquakes_loaded']:,} ({stats['earthquakes_loaded']/total*100:.2f}%)")
+        print(f"  Ruido cargado:              {stats['noise_loaded']:,} ({stats['noise_loaded']/total*100:.2f}%)")
+        
+        aug_total = stats['earthquakes_augmented'] + stats['noise_augmented']
+        if aug_total > 0:
+            print(f"\nSeñales con augmentación:     {aug_total:,}")
+            print(f"  Terremotos augmentados:     {stats['earthquakes_augmented']:,} ({stats['earthquakes_augmented']/aug_total*100:.2f}%)")
+            print(f"  Ruido augmentado:           {stats['noise_augmented']:,} ({stats['noise_augmented']/aug_total*100:.2f}%)")
+        
+        print("="*60 + "\n")
+    
+    @classmethod
+    def reset_stats(cls):
+        """Reinicia las estadísticas."""
+        cls._stats = {
+            'total_loaded': 0,
+            'earthquakes_loaded': 0,
+            'noise_loaded': 0,
+            'earthquakes_augmented': 0,
+            'noise_augmented': 0
+        }
 
 
 class STEADLoader:
@@ -298,6 +399,35 @@ class STEADLoader:
         
         self.filtered_indices = filtered_indices
         logging.info(f"Filtered to {len(filtered_indices)} samples for region '{self.region}'")
+        
+        # NUEVO: Contar señales de ruido vs terremotos
+        filtered_metadata = metadata.loc[filtered_indices]
+        if 'trace_category' in filtered_metadata.columns:
+            earthquake_count = 0
+            noise_count = 0
+            other_count = 0
+            
+            for category in filtered_metadata['trace_category']:
+                if 'earthquake' in str(category).lower():
+                    earthquake_count += 1
+                elif 'noise' in str(category).lower():
+                    noise_count += 1
+                else:
+                    other_count += 1
+            
+            total = len(filtered_indices)
+            print("\n" + "="*60)
+            print("DISTRIBUCIÓN DE SEÑALES EN EL DATASET")
+            print("="*60)
+            print(f"Total de señales:     {total:,}")
+            print(f"Señales de terremoto: {earthquake_count:,} ({earthquake_count/total*100:.2f}%)")
+            print(f"Señales de ruido:     {noise_count:,} ({noise_count/total*100:.2f}%)")
+            if other_count > 0:
+                print(f"Otras señales:        {other_count:,} ({other_count/total*100:.2f}%)")
+            print(f"\nRelación ruido/terremoto: {noise_count/earthquake_count:.2f}:1" if earthquake_count > 0 else "N/A")
+            print("="*60 + "\n")
+        else:
+            logging.warning("Column 'trace_category' not found in metadata")
         
         return filtered_indices
     

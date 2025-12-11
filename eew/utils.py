@@ -261,3 +261,70 @@ def format_time(seconds):
         return f"{minutes}m {secs}s"
     else:
         return f"{secs}s"
+
+
+def print_augmentation_stats():
+    """
+    Imprime todas las estadísticas de augmentación y carga de datos.
+    
+    Esta función consolida las estadísticas de:
+    - STEADDataset (señales cargadas)
+    - WaveformAugmenter (augmentaciones básicas)
+    - AdvancedWaveformAugmenter (augmentaciones avanzadas)
+    - BalancedAugmenter (augmentación balanceada para clases desbalanceadas)
+    - NoiseOversamplingDataset (sobremuestreo de ruido)
+    """
+    try:
+        from .data_loader import STEADDataset
+        STEADDataset.print_stats()
+    except Exception as e:
+        logging.debug(f"No se pudieron imprimir stats de STEADDataset: {e}")
+    
+    try:
+        from .augmentation import WaveformAugmenter
+        WaveformAugmenter.print_stats()
+    except Exception as e:
+        logging.debug(f"No se pudieron imprimir stats de WaveformAugmenter: {e}")
+    
+    try:
+        from .advanced_augmentation import AdvancedWaveformAugmenter
+        AdvancedWaveformAugmenter.print_stats()
+    except Exception as e:
+        logging.debug(f"No se pudieron imprimir stats de AdvancedWaveformAugmenter: {e}")
+    
+    try:
+        from .balanced_augmentation import BalancedAugmenter, NoiseOversamplingDataset
+        BalancedAugmenter.print_stats()
+        NoiseOversamplingDataset.print_stats()
+    except Exception as e:
+        logging.debug(f"No se pudieron imprimir stats de BalancedAugmenter: {e}")
+
+
+def reset_augmentation_stats():
+    """
+    Reinicia todas las estadísticas de augmentación y carga de datos.
+    """
+    try:
+        from .data_loader import STEADDataset
+        STEADDataset.reset_stats()
+    except Exception:
+        pass
+    
+    try:
+        from .augmentation import WaveformAugmenter
+        WaveformAugmenter.reset_stats()
+    except Exception:
+        pass
+    
+    try:
+        from .advanced_augmentation import AdvancedWaveformAugmenter
+        AdvancedWaveformAugmenter.reset_stats()
+    except Exception:
+        pass
+    
+    try:
+        from .balanced_augmentation import BalancedAugmenter, NoiseOversamplingDataset
+        BalancedAugmenter.reset_stats()
+        NoiseOversamplingDataset.reset_stats()
+    except Exception:
+        pass

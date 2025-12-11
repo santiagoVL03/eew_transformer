@@ -25,7 +25,8 @@ from eew.augmentation import WaveformAugmenter, NoAugmentation
 from eew.trainer import Trainer, OnlineTrainer
 from eew.evaluator import Evaluator, plot_training_history
 from eew.utils import (
-    set_seed, get_device, count_parameters, setup_logging
+    set_seed, get_device, count_parameters, setup_logging,
+    print_augmentation_stats, reset_augmentation_stats
 )
 
 
@@ -109,6 +110,12 @@ def parse_args():
                        help='Mixup alpha parameter (0 = disabled, typical: 0.1-0.4)')
     parser.add_argument('--use_advanced_aug', action='store_true',
                        help='Use advanced augmentation (channel dropout, baseline drift)')
+    parser.add_argument('--balanced_aug', action='store_true',
+                       help='Use balanced augmentation (only augment noise class)')
+    parser.add_argument('--oversample_noise', action='store_true',
+                       help='Oversample noise class to balance dataset (RECOMMENDED for imbalanced data)')
+    parser.add_argument('--noise_oversample_ratio', type=float, default=4.0,
+                       help='Oversampling ratio for noise class (e.g., 4.0 = create 4 copies of each noise sample)')
     
     # Loss function
     parser.add_argument('--loss_type', type=str, default='focal',
@@ -307,7 +314,30 @@ def main():
     
     # Setup augmentation
     if args.augment:
-        if args.use_advanced_aug:
+        if args.balanced_aug:
+            # Augmentación balanceada: SOLO augmenta ruido
+            from eew.balanced_augmentation import BalancedAugmenter
+            
+            logging.info("="*70)
+            logging.info("BALANCED AUGMENTATION ENABLED")
+            logging.info("="*70)
+            logging.info("Augmentation will be applied ONLY to noise samples")
+            logging.info("This helps balance the imbalanced earthquake/noise ratio")
+            logging.info("="*70 + "\n")
+            
+            transform_train = BalancedAugmenter(
+                augment_noise_only=True,  # CLAVE: solo ruido
+                use_advanced=args.use_advanced_aug,
+                add_noise=True,
+                noise_snr_range=(args.noise_snr_min, args.noise_snr_max),
+                scale_amplitude=True,
+                time_shift=True,
+                channel_dropout=args.use_advanced_aug,
+                baseline_drift=args.use_advanced_aug,
+                sampling_rate=args.sampling_rate,
+                p=0.4  # Reducido de 0.7 para evitar overfitting (augmentación más conservadora)
+            )
+        elif args.use_advanced_aug:
             from eew.advanced_augmentation import AdvancedWaveformAugmenter
             transform_train = AdvancedWaveformAugmenter(
                 add_noise=True,
@@ -361,6 +391,57 @@ def main():
         window_size=args.window,
         sampling_rate=args.sampling_rate
     )
+    
+    # ========================================================================
+    # Apply noise oversampling if requested
+    # ========================================================================
+    
+    if args.oversample_noise:
+        from eew.balanced_augmentation import NoiseOversamplingDataset, BalancedAugmenter
+        from torch.utils.data import DataLoader
+        
+        logging.info("\n" + "="*70)
+        logging.info("NOISE OVERSAMPLING ENABLED")
+        logging.info("="*70)
+        logging.info(f"Oversampling ratio: {args.noise_oversample_ratio}x")
+        logging.info("This will create virtual copies of noise samples to balance the dataset")
+        logging.info("="*70 + "\n")
+        
+        # Crear augmenter balanceado para el sobremuestreo
+        oversample_augmenter = BalancedAugmenter(
+            augment_noise_only=True,
+            use_advanced=args.use_advanced_aug,
+            add_noise=True,
+            noise_snr_range=(args.noise_snr_min, args.noise_snr_max),
+            scale_amplitude=True,
+            time_shift=True,
+            channel_dropout=args.use_advanced_aug,
+            baseline_drift=args.use_advanced_aug,
+            sampling_rate=args.sampling_rate,
+            p=0.5  # Reducido de 0.8 para evitar overfitting (copias más similares al original)
+        )
+        
+        # Envolver el dataset de entrenamiento con sobremuestreo
+        oversampled_train_dataset = NoiseOversamplingDataset(
+            base_dataset=train_loader.dataset,
+            oversampling_ratio=args.noise_oversample_ratio,
+            augmenter=oversample_augmenter
+        )
+        
+        # Crear nuevo train_loader con el dataset sobremuestreado
+        use_pin_memory = (not use_lazy_load) and torch.cuda.is_available()
+        train_loader = DataLoader(
+            oversampled_train_dataset,
+            batch_size=args.batch,
+            shuffle=True,
+            num_workers=effective_num_workers,
+            pin_memory=use_pin_memory,
+            persistent_workers=False,
+            prefetch_factor=2 if effective_num_workers > 0 else None,
+            drop_last=True
+        )
+        
+        logging.info(f"New training set size: {len(oversampled_train_dataset):,} samples\n")
     
     # ========================================================================
     # Create model
@@ -489,6 +570,12 @@ def main():
         
         # Train
         history = trainer.train(num_epochs=args.epochs)
+        
+        # Imprimir estadísticas de augmentación
+        logging.info("\n" + "="*70)
+        logging.info("ESTADÍSTICAS DE AUGMENTACIÓN Y CARGA DE DATOS")
+        logging.info("="*70)
+        print_augmentation_stats()
         
         # Save training history
         history_path = save_dir / 'training_history.json'

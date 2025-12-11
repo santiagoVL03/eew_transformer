@@ -122,6 +122,12 @@ class AdvancedWaveformAugmenter:
     Advanced waveform augmentation combining multiple techniques.
     """
     
+    # Contador de estadísticas (compartido entre todas las instancias)
+    _stats = {
+        'total_processed': 0,
+        'augmentations_applied': 0
+    }
+    
     def __init__(
         self,
         # Original augmentations
@@ -138,7 +144,8 @@ class AdvancedWaveformAugmenter:
         drift_range=(-0.1, 0.1),
         # General
         sampling_rate=100,
-        p=0.5
+        p=0.5,
+        track_stats=True
     ):
         """
         Args:
@@ -154,6 +161,7 @@ class AdvancedWaveformAugmenter:
             drift_range: Drift range (min, max)
             sampling_rate: Sampling rate in Hz
             p: Base probability of applying each augmentation
+            track_stats: Whether to track augmentation statistics
         """
         self.add_noise = add_noise
         self.noise_snr_range = noise_snr_range
@@ -167,6 +175,7 @@ class AdvancedWaveformAugmenter:
         self.drift_range = drift_range
         self.sampling_rate = sampling_rate
         self.p = p
+        self.track_stats = track_stats
         
         # Initialize sub-augmenters
         self.channel_dropout_augmenter = ChannelDropout(
@@ -183,29 +192,68 @@ class AdvancedWaveformAugmenter:
         Returns:
             Augmented waveform
         """
+        if self.track_stats:
+            AdvancedWaveformAugmenter._stats['total_processed'] += 1
+        
         augmented = waveform.copy()
+        aug_count = 0
         
         # Add noise
         if self.add_noise and np.random.rand() < self.p:
             augmented = self._add_noise(augmented)
+            aug_count += 1
         
         # Scale amplitude
         if self.scale_amplitude and np.random.rand() < self.p:
             augmented = self._scale_amplitude(augmented)
+            aug_count += 1
         
         # Time shift
         if self.time_shift and np.random.rand() < self.p:
             augmented = self._time_shift(augmented)
+            aug_count += 1
         
         # Channel dropout
         if self.channel_dropout and np.random.rand() < self.p:
             augmented = self.channel_dropout_augmenter(augmented)
+            aug_count += 1
         
         # Baseline drift
         if self.baseline_drift and np.random.rand() < self.p:
             augmented = self._add_baseline_drift(augmented)
+            aug_count += 1
+        
+        if self.track_stats and aug_count > 0:
+            AdvancedWaveformAugmenter._stats['augmentations_applied'] += aug_count
         
         return augmented
+    
+    @classmethod
+    def print_stats(cls):
+        """Imprime las estadísticas de augmentación."""
+        stats = cls._stats
+        total = stats['total_processed']
+        
+        if total == 0:
+            print("\n⚠️  No se han procesado señales con AdvancedWaveformAugmenter aún")
+            return
+        
+        print("\n" + "="*60)
+        print("ESTADÍSTICAS DE AUGMENTACIÓN - AdvancedWaveformAugmenter")
+        print("="*60)
+        print(f"Total de señales procesadas: {total:,}")
+        print(f"Augmentaciones aplicadas:    {stats['augmentations_applied']:,}")
+        print(f"Promedio aug/señal:          {stats['augmentations_applied']/total:.2f}")
+        print("  (noise, scale, time_shift, channel_dropout, baseline_drift)")
+        print("="*60 + "\n")
+    
+    @classmethod
+    def reset_stats(cls):
+        """Reinicia las estadísticas."""
+        cls._stats = {
+            'total_processed': 0,
+            'augmentations_applied': 0
+        }
     
     def _add_noise(self, waveform):
         """Add Gaussian noise at random SNR."""
